@@ -43,6 +43,8 @@ Please refer to the source code of the HybridGNet for additional information: [h
 ## Citations 
 
 If you use **CheXmask-U** in your research, please cite the following:
+
+```
 @misc{cosarinsky2025chexmaskuquantifyinguncertaintylandmarkbased,
       title={CheXmask-U: Quantifying uncertainty in landmark-based anatomical segmentation for X-ray images}, 
       author={Matias Cosarinsky and Nicolas Gaggion and Rodrigo Echeveste and Enzo Ferrante},
