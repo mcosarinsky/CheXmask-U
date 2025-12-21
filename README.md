@@ -28,6 +28,7 @@ model = HybridGNetHF.from_pretrained(
     subfolder="v1_skip",
     device=device
 )
+```
 
 ## Dataset
 
