@@ -4,6 +4,11 @@ import torch.nn.functional as F
 from models.modelUtils import ChebConv, Pool, residualBlock
 import torchvision.ops.roi_align as roi_align
 import numpy as np
+import scipy.sparse as sp
+from huggingface_hub import PyTorchModelHubMixin
+from utils.utils import genMatrixesLungsHeart, scipy_to_torch_sparse
+import json
+from huggingface_hub import hf_hub_download
 
 class EncoderConv(nn.Module):
     def __init__(self, latents = 64, hw = 32):
@@ -302,3 +307,101 @@ class HybridNoSkip(nn.Module):
             z = self.mu
             
         return self.decode(z, conv6, conv5)
+    
+
+
+class HybridGNetHF(nn.Module, PyTorchModelHubMixin):
+    repo_url = "https://github.com/mcosarinsky/CheXmask-U"
+    license = "mit"
+    pipeline_tag = "image-segmentation"
+
+    def __init__(self, latents=64, inputsize=1024, K=6, filters=None,
+                 skip_features=32, eval_sampling=True, use_skip=True,
+                 n_nodes=None, device="cpu", **kwargs):
+        super().__init__()
+        
+        self.device = device 
+
+        # Defaults
+        if filters is None:
+            filters = [2, 32, 32, 32, 16, 16, 16]
+        
+        # Save config
+        self.config = {
+            'latents': latents,
+            'inputsize': inputsize,
+            'K': K,
+            'filters': filters,
+            'skip_features': skip_features,
+            'eval_sampling': eval_sampling,
+            'use_skip': use_skip
+        }
+        self.config.update(kwargs)
+        self.use_skip = use_skip
+        
+        # ---- generate matrices ----
+        A, AD, D, U = genMatrixesLungsHeart()
+        N1, N2 = A.shape[0], AD.shape[0]
+        self.config['n_nodes'] = [N1, N1, N1, N2, N2, N2]
+
+        # ---- convert to sparse tensors and move to device ----
+        A_ = [sp.csc_matrix(A).tocoo() for _ in range(3)] + [sp.csc_matrix(AD).tocoo() for _ in range(3)]
+        D_ = [sp.csc_matrix(D).tocoo()]
+        U_ = [sp.csc_matrix(U).tocoo()]
+
+        self.A_t = [scipy_to_torch_sparse(x).to(self.device) for x in A_]
+        self.D_t = [scipy_to_torch_sparse(x).to(self.device) for x in D_]
+        self.U_t = [scipy_to_torch_sparse(x).to(self.device) for x in U_]
+
+        # ---- build model ----
+        if self.use_skip:
+            self.model = Hybrid(self.config, self.D_t, self.U_t, self.A_t)
+        else:
+            self.model = HybridNoSkip(self.config, self.D_t, self.U_t, self.A_t)
+
+        # move model parameters to device
+        self.model.to(self.device)
+
+    def forward(self, x):
+        return self.model(x)
+
+    # -----------------------------
+    # Dynamic from_pretrained from Hugging Face Hub ONLY
+    # -----------------------------
+    @classmethod
+    def from_pretrained(cls, repo_id, subfolder=None, device="cpu", **kwargs):
+        """
+        Loads model directly from Hugging Face Hub. Does NOT use local paths.
+        """
+        # Download config from Hub
+        config_file = hf_hub_download(
+            repo_id=repo_id,
+            filename="config.json",
+            subfolder=subfolder
+        )
+        with open(config_file, "r") as f:
+            config = json.load(f)
+        
+        # Merge any additional kwargs
+        config.update(kwargs)
+
+        # Dynamically compute n_nodes
+        A, AD, D, U = genMatrixesLungsHeart()
+        N1, N2 = A.shape[0], AD.shape[0]
+        config['n_nodes'] = [N1, N1, N1, N2, N2, N2]
+
+        # Instantiate model on desired device
+        model = cls(device=device, **config)
+
+        # Download weights from Hub
+        weights_path = hf_hub_download(
+            repo_id=repo_id,
+            filename="pytorch_model.bin",
+            subfolder=subfolder
+        )
+        state_dict = torch.load(weights_path, map_location=device)
+        if not next(iter(state_dict.keys())).startswith("model."):
+            state_dict = {f"model.{k}": v for k, v in state_dict.items()}
+        model.load_state_dict(state_dict)
+
+        return model
